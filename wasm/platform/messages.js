@@ -18,6 +18,8 @@ const AsyncFunctions = {
   'STUN': (...args) => Module.STUN(...args),
   // serverMajorVersion, address, randomNumber
   'pair': (...args) => Module.pair(...args),
+  // mac address
+  'wakeOnLan': (...args) => Module.wakeOnLan(...args),
 };
 
 var callbacks = {}
@@ -67,6 +69,7 @@ var handlePromiseMessage = function(callbackId, type, msg) {
 function handleMessage(msg) {
   if (msg.indexOf('StatMsg: ') === 0) {
     $('#stream_stats').text(msg.replace('StatMsg: ', ''));
+	console.log('%c[messages.js, handleMessage, StatsMsg]', 'color:gray;', 'Message data: ', msg);//FHEN
     return;
   }
   console.log('%c[messages.js, handleMessage]', 'color:gray;', 'Message data: ', msg);
@@ -108,6 +111,10 @@ function handleMessage(msg) {
     snackbarLogLong(msg.replace('DialogMsg: ', ''));
   } else if (msg === 'displayVideo') {
     $("#listener").addClass("fullscreen");
+  } else if (msg.indexOf('mouseEmulation enabled') === 0) {
+    snackbarLogLong("Mouse Emulation is now enabled");
+  } else if (msg.indexOf('mouseEmulation disabled') === 0) {
+    snackbarLogLong("Mouse Emulation is now disabled");
   } else if (msg.indexOf('controllerRumble: ') === 0) {
 	  const eventData = msg.split(' ')[1].split(',');
 	  const gamepadIdx = parseInt(eventData[0]);

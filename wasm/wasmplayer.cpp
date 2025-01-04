@@ -49,7 +49,6 @@ static bool s_hasFirstFrame = false;
 
 static int s_VideoFormat;
 static std::string s_StatString = "";
-
 static uint32_t total_bytes = 0;
 static int m_LastFrameNumber = 0;
 static VIDEO_STATS m_ActiveWndVideoStats;
@@ -154,28 +153,13 @@ int height, int redrawRate, void* context, int drFlags) {
   ClLogMessage("closed done\n");
 
   {
-    samsung::wasm::ChannelLayout selectedLayout;
-    switch (CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(g_Instance->m_AudioConfig))
-    {
-    case 6:
-      selectedLayout = samsung::wasm::ChannelLayout::k5_1Back; 
-      break;
-    case 8:
-      selectedLayout = samsung::wasm::ChannelLayout::k7_1; 
-      break;
-    default:
-      selectedLayout = samsung::wasm::ChannelLayout::kStereo;
-      break;
-    }
-
     auto add_track_result = g_Instance->m_Source.AddTrack(
       samsung::wasm::ElementaryAudioTrackConfig {
-        "audio/webm; codecs=\"pcm\"",  // mimeType
-        // "audio/mp4; codecs=\"pcm\"",  // mimeType, works
+        "audio/mp4; codecs=\"pcm\"",  // mimeType
         {},  // extradata (empty?)
         samsung::wasm::DecodingMode::kHardware,
-        samsung::wasm::SampleFormat::kS16, //test kS16 is ok, kPlanarS16 does not work at all
-        selectedLayout,
+		samsung::wasm::SampleFormat::kS16,
+        samsung::wasm::ChannelLayout::kStereo,
         kSampleRate
       });
     if (add_track_result) {
@@ -185,7 +169,7 @@ int height, int redrawRate, void* context, int drFlags) {
   }
 
   {
-    s_VideoFormat = videoFormat;
+	s_VideoFormat = videoFormat;
     const char *mimetype = "video/mp4";
     if(videoFormat & VIDEO_FORMAT_H265_MAIN10) {
       mimetype = "video/mp4; codecs=\"hev1.2.4.L153.B0\"";  // h265 main10 mimeType	: hev1.2.4.L153.B0 can be updated to hev1.2.6.L153.B0 depending on TV capabilities
@@ -193,13 +177,12 @@ int height, int redrawRate, void* context, int drFlags) {
       mimetype = "video/mp4; codecs=\"hev1.1.6.L93.B0\"";  // h265 main mimeType
     } else if(videoFormat & VIDEO_FORMAT_H264) {
       mimetype = "video/mp4; codecs=\"avc1.64002A\"";  // h264 High Profile 4.2 mimeType
-    } else if(videoFormat & VIDEO_FORMAT_AV1_MAIN10) {
-      //https://developer.mozilla.org/en-US/docs/Web/Media/Formats/codecs_parameter#av1
-      //mimetype = "video/mp4; codecs=\"av01.0.15M.10\""; // AV1 4k 120fps Main 10-bit profile
-      mimetype = "video/mp4; codecs=\"av01.1.15H.10\""; // AV1 4k 120fps High 10-bit profile
-    } else if(videoFormat & VIDEO_FORMAT_AV1_MAIN8) {
-      mimetype = "video/mp4; codecs=\"av01.1.15H.08\""; // AV1 4k 120fps High 8-bit profile
-    } else {
+    } else if (videoFormat & VIDEO_FORMAT_AV1_MAIN8) {
+      mimetype = "video/mp4; codecs=\"av01.1.15H.08\"";  // AV1 Main Profile, level 5.1, Main tier, 8 bits
+    } else if (videoFormat & VIDEO_FORMAT_AV1_MAIN10) {
+      mimetype = "video/mp4; codecs=\"av01.1.15H.10\"";  // AV1 Main Profile, level 5.1, Main tier, 10 bits
+    }
+    else {
       ClLogMessage("Cannot select mime type for videoFormat=0x%x\n", videoFormat);
       return -1;
     }
@@ -210,7 +193,7 @@ int height, int redrawRate, void* context, int drFlags) {
         mimetype,
         {},                                   // extradata (empty?)
         samsung::wasm::DecodingMode::kHardware,
-        static_cast<uint32_t>(width),
+		static_cast<uint32_t>(width),
         static_cast<uint32_t>(height),
         static_cast<uint32_t>(redrawRate),  // framerateNum
         1,                                  // framerateDen
@@ -261,9 +244,10 @@ int redrawRate, void* context, int drFlags) {
   s_ptsDiff = 0s;
 
   s_FramePacingEnabled = g_Instance->m_FramePacingEnabled;
-
+  
   s_StatString.resize(1000);
   memset(&m_ActiveWndVideoStats, 0, sizeof(m_ActiveWndVideoStats));
+  m_ActiveWndVideoStats.lastFrameStats = 0; //FHEN
   memset(&m_LastWndVideoStats, 0, sizeof(m_LastWndVideoStats));
   memset(&m_GlobalVideoStats, 0, sizeof(m_GlobalVideoStats));
 
@@ -325,7 +309,7 @@ int MoonlightInstance::VidDecSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
     }
   }
   s_lastTime = now;
-
+  
   total_bytes += decodeUnit->fullLength;
   if (!m_LastFrameNumber) {
       m_ActiveWndVideoStats.measurementStartTimestamp = LiGetMillis();
@@ -336,35 +320,31 @@ int MoonlightInstance::VidDecSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
       m_ActiveWndVideoStats.totalFrames += decodeUnit->frameNumber - (m_LastFrameNumber + 1);
       m_LastFrameNumber = decodeUnit->frameNumber;
   }
-
   // Flip stats windows roughly every second
   if (m_ActiveWndVideoStats.measurementStartTimestamp + 1000 < LiGetMillis()) {
+//	if (m_ActiveWndVideoStats.lastFrameStats + 60 < m_LastFrameNumber) { //FHEN
       // Update overlay stats if it's enabled
       if (g_Instance->m_StatsEnabled) { 
           float bitrate_bps = (total_bytes * 8.0);
           float bitrate_mbps = bitrate_bps / 1024.0 / 1024.0;  
-
           VIDEO_STATS lastTwoWndStats = {};
           lastTwoWndStats.bitrate_mbps = bitrate_mbps; 
           addVideoStats(m_LastWndVideoStats, lastTwoWndStats);
           addVideoStats(m_ActiveWndVideoStats, lastTwoWndStats);
           
           stringifyVideoStats(lastTwoWndStats, s_StatString.data(), s_StatString.length());
-
-          PostToJsAsync(std::string("StatMsg: " + s_StatString));
+          PostToJs(std::string("StatMsg: " + s_StatString));
           std::fill(s_StatString.begin(), s_StatString.end(), ' ');
           total_bytes = 0;
       }
-
       // Accumulate these values into the global stats
       addVideoStats(m_ActiveWndVideoStats, m_GlobalVideoStats);
-
       // Move this window into the last window slot and clear it for next window
       memcpy(&m_LastWndVideoStats, &m_ActiveWndVideoStats, sizeof(m_ActiveWndVideoStats));
       memset(&m_ActiveWndVideoStats, 0, sizeof(m_ActiveWndVideoStats));
       m_ActiveWndVideoStats.measurementStartTimestamp = LiGetMillis();
-  }
-
+	//  m_ActiveWndVideoStats.lastFrameStats = m_LastFrameNumber;
+    }
   if (decodeUnit->frameHostProcessingLatency != 0) {
       if (m_ActiveWndVideoStats.minHostProcessingLatency != 0) {
           m_ActiveWndVideoStats.minHostProcessingLatency = MIN(m_ActiveWndVideoStats.minHostProcessingLatency, decodeUnit->frameHostProcessingLatency);
@@ -376,7 +356,6 @@ int MoonlightInstance::VidDecSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
   }
   m_ActiveWndVideoStats.maxHostProcessingLatency = MAX(m_ActiveWndVideoStats.maxHostProcessingLatency, decodeUnit->frameHostProcessingLatency);
   m_ActiveWndVideoStats.totalHostProcessingLatency += decodeUnit->frameHostProcessingLatency;
-
   m_ActiveWndVideoStats.receivedFrames++;
   m_ActiveWndVideoStats.totalFrames++;
 
@@ -388,24 +367,23 @@ int MoonlightInstance::VidDecSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
     decodeUnit->frameType == FRAME_TYPE_IDR,
     offset,
     s_DecodeBuffer.data(),
-    0,
-    0,
-    0,
-    0,
+    s_Width,
+    s_Height,
+    s_Framerate,
+    1,
     g_Instance->m_VideoSessionId.load()
   };
-
+  
   m_ActiveWndVideoStats.totalReassemblyTime += decodeUnit->enqueueTimeMs - decodeUnit->receiveTimeMs;
   m_ActiveWndVideoStats.totalDecodeTime += LiGetMillis() - decodeUnit->enqueueTimeMs;
   m_ActiveWndVideoStats.decodedFrames++;
-
   uint64_t beforeRender = LiGetMillis();
+
   if (g_Instance->m_VideoTrack.AppendPacket(pkt)) {
     uint64_t afterRender = LiGetMillis();
     s_pktPts += s_frameDuration;
-    m_ActiveWndVideoStats.totalRenderTime += afterRender - beforeRender;
+	m_ActiveWndVideoStats.totalRenderTime += afterRender - beforeRender;
     m_ActiveWndVideoStats.renderedFrames++;
-
     return DR_OK;
   } else {
     ClLogMessage("Append video packet failed\n");
@@ -424,7 +402,6 @@ void MoonlightInstance::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst) {
     dst.totalDecodeTime += src.totalDecodeTime;
     dst.totalPacerTime += src.totalPacerTime;
     dst.totalRenderTime += src.totalRenderTime;
-
     if (dst.minHostProcessingLatency == 0) {
         dst.minHostProcessingLatency = src.minHostProcessingLatency;
     }
@@ -434,7 +411,6 @@ void MoonlightInstance::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst) {
     dst.maxHostProcessingLatency = MAX(dst.maxHostProcessingLatency, src.maxHostProcessingLatency);
     dst.totalHostProcessingLatency += src.totalHostProcessingLatency;
     dst.framesWithHostProcessingLatency += src.framesWithHostProcessingLatency;
-
     if (!LiGetEstimatedRttInfo(&dst.lastRtt, &dst.lastRttVariance)) {
         dst.lastRtt = 0;
         dst.lastRttVariance = 0;
@@ -446,14 +422,11 @@ void MoonlightInstance::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst) {
           //return;
         }
     }
-
     auto now = LiGetMillis();
-
     // Initialize the measurement start point if this is the first video stat window
     if (!dst.measurementStartTimestamp) {
         dst.measurementStartTimestamp = src.measurementStartTimestamp;
     }
-
     // The following code assumes the global measure was already started first
     if (dst.measurementStartTimestamp <= src.measurementStartTimestamp) {
       dst.totalFps = (float)dst.totalFrames / ((float)(now - dst.measurementStartTimestamp) / 1000);
@@ -468,20 +441,16 @@ void MoonlightInstance::stringifyVideoStats(VIDEO_STATS& stats, char* output, in
     int offset = 0;
     const char* codecString;
     int ret;
-
     // Start with an empty string
     output[offset] = 0;
-
     switch (s_VideoFormat)
     {
     case VIDEO_FORMAT_H264:
         codecString = "H.264";
         break;
-
     case VIDEO_FORMAT_H265:
         codecString = "HEVC";
         break;
-
     case VIDEO_FORMAT_H265_MAIN10:
         if (LiGetCurrentHostDisplayHdrMode()) {
             codecString = "HEVC Main 10 HDR";
@@ -490,11 +459,9 @@ void MoonlightInstance::stringifyVideoStats(VIDEO_STATS& stats, char* output, in
             codecString = "HEVC Main 10 SDR";
         }
         break;
-
     case VIDEO_FORMAT_AV1_MAIN8:
         codecString = "AV1";
         break;
-
     case VIDEO_FORMAT_AV1_MAIN10:
         if (LiGetCurrentHostDisplayHdrMode()) {
             codecString = "AV1 10-bit HDR";
@@ -503,13 +470,11 @@ void MoonlightInstance::stringifyVideoStats(VIDEO_STATS& stats, char* output, in
             codecString = "AV1 10-bit SDR";
         }
         break;
-
     default:
         //SDL_assert(false);
         codecString = "UNKNOWN";
         break;
     }
-
     if (stats.receivedFps > 0) {
         if (codecString != nullptr) {
             ret = snprintf(&output[offset],
@@ -523,10 +488,8 @@ void MoonlightInstance::stringifyVideoStats(VIDEO_STATS& stats, char* output, in
                 //SDL_assert(false);
                 return;
             }
-
             offset += ret;
         }
-
         ret = snprintf(&output[offset],
                        length - offset,
                        "Incoming frame rate from network: %.2f FPS\n"
@@ -539,10 +502,8 @@ void MoonlightInstance::stringifyVideoStats(VIDEO_STATS& stats, char* output, in
             //SDL_assert(false);
             return;
         }
-
         offset += ret;
     }
-
     if (stats.framesWithHostProcessingLatency > 0) {
         ret = snprintf(&output[offset],
                        length - offset,
@@ -554,20 +515,16 @@ void MoonlightInstance::stringifyVideoStats(VIDEO_STATS& stats, char* output, in
             //SDL_assert(false);
             return;
         }
-
         offset += ret;
     }
-
     if (stats.renderedFrames != 0) {
         char rttString[32];
-
         if (stats.lastRtt != 0) {
             snprintf(rttString, sizeof(rttString), "%u ms (variance: %u ms)", stats.lastRtt, stats.lastRttVariance);
         }
         else {
             snprintf(rttString, sizeof(rttString), "N/A");
         }
-
         ret = snprintf(&output[offset],
                        length - offset,
                        "Frames dropped by your network connection: %.2f%%\n"
@@ -588,7 +545,6 @@ void MoonlightInstance::stringifyVideoStats(VIDEO_STATS& stats, char* output, in
             //SDL_assert(false);
             return;
         }
-
         offset += ret;
     }
 }

@@ -51,7 +51,7 @@ MoonlightInstance::MoonlightInstance()
       m_VideoSessionId(0),
       m_MediaElement("nacl_module"),
       m_Source(
-        samsung::wasm::ElementaryMediaStreamSource::LatencyMode::kLow, //TODO add option in menu
+        samsung::wasm::ElementaryMediaStreamSource::LatencyMode::kUltraLow,
         samsung::wasm::ElementaryMediaStreamSource::RenderingMode::kMediaElement),
       m_SourceListener(this),
       m_AudioTrackListener(this),
@@ -177,7 +177,7 @@ MessageResult MoonlightInstance::StartStream(
 std::string host, std::string width, std::string height, std::string fps,
 std::string bitrate, std::string rikey, std::string rikeyid,
 std::string appversion, std::string gfeversion, std::string rtspurl, bool framePacing,
-bool audioSync, bool hdrEnabled, std::string codecVideo, std::string audioConfig, bool statsEnabled) {
+bool audioSync, bool hdrEnabled, std::string codecVideo, std::string serverCodecSupportMode, bool statsEnabled) {
   PostToJs("Setting stream width to: " + width);
   PostToJs("Setting stream height to: " + height);
   PostToJs("Setting stream fps to: " + fps);
@@ -192,7 +192,7 @@ bool audioSync, bool hdrEnabled, std::string codecVideo, std::string audioConfig
   PostToJs("Setting audio syncing to: " + std::to_string(audioSync));
   PostToJs("Setting HDR to:" + std::to_string(hdrEnabled));
   PostToJs("Setting videoCodec: " + codecVideo);
-  PostToJs("Setting audioConfig: " + audioConfig);
+  PostToJs("Setting serverCodecSupportMode: " + serverCodecSupportMode);
   PostToJs("Setting stats to: " + std::to_string(statsEnabled));
 
   // Populate the stream configuration
@@ -201,40 +201,33 @@ bool audioSync, bool hdrEnabled, std::string codecVideo, std::string audioConfig
   m_StreamConfig.height = stoi(height);
   m_StreamConfig.fps = stoi(fps);
   m_StreamConfig.bitrate = stoi(bitrate);  // kilobits per second
-  
-  if (audioConfig == "51") {
-    m_StreamConfig.audioConfiguration = MAKE_AUDIO_CONFIGURATION(6, 0x60F); //011000001111
-  } else if (audioConfig == "71") {
-    m_StreamConfig.audioConfiguration = AUDIO_CONFIGURATION_71_SURROUND; //011000111111
-  } else {
-    m_StreamConfig.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
-  }
-
+  m_StreamConfig.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
   m_StreamConfig.streamingRemotely = STREAM_CFG_AUTO;
   m_StreamConfig.packetSize = 1392;
   m_StreamConfig.encryptionFlags = ENCFLG_NONE;
+//m_StreamConfig.supportsHevc = true;
+//m_StreamConfig.enableHdr = hdrEnabled;
+  m_StreamConfig.supportedVideoFormats = stoi(codecVideo,0,16); 
 
   // H.264 is always supported
-  int derivedVideoFormats = VIDEO_FORMAT_H264;
+/*  int derivedVideoFormats = VIDEO_FORMAT_H264;
   // sad switch options from index.html
   switch (stoi(codecVideo)) {
-    case 264:
+    case 0x0001:
         break;
-    case 265:
+    case 0x0201:
         derivedVideoFormats |= VIDEO_FORMAT_H265;
         if (hdrEnabled) {
             derivedVideoFormats |= VIDEO_FORMAT_H265_MAIN10;
         }
         break;
-    case 1:
+    case 0x2201:
         derivedVideoFormats |= VIDEO_FORMAT_AV1_MAIN8;
         derivedVideoFormats |= SCM_AV1_MAIN8;
-
         if (hdrEnabled) {
             derivedVideoFormats |= VIDEO_FORMAT_AV1_MAIN10;
             derivedVideoFormats |= SCM_AV1_MAIN10;
         }
-
         // We'll try to fall back to HEVC first if AV1 fails. We'd rather not fall back
         // straight to H.264 if the user asked for AV1 and the host doesn't support it.
         if (derivedVideoFormats & VIDEO_FORMAT_AV1_MAIN8) {
@@ -243,10 +236,9 @@ bool audioSync, bool hdrEnabled, std::string codecVideo, std::string audioConfig
         if (derivedVideoFormats & VIDEO_FORMAT_AV1_MAIN10) {
             derivedVideoFormats |= VIDEO_FORMAT_H265_MAIN10;
         }
-
         break;
   }
-  m_StreamConfig.supportedVideoFormats = derivedVideoFormats;
+  m_StreamConfig.supportedVideoFormats = derivedVideoFormats;*/
 
   // Load the rikey and rikeyid into the stream configuration
   HexStringToBytes(rikey.c_str(), m_StreamConfig.remoteInputAesKey);
@@ -261,8 +253,7 @@ bool audioSync, bool hdrEnabled, std::string codecVideo, std::string audioConfig
   m_FramePacingEnabled = framePacing;
   m_AudioSyncEnabled = audioSync;
   m_HdrEnabled = hdrEnabled;
-  m_ServerCodecModeSupport = derivedVideoFormats; // FIXME value should come from the server
-  m_AudioConfig = m_StreamConfig.audioConfiguration;
+  m_ServerCodecModeSupport = stoi(serverCodecSupportMode);
   m_StatsEnabled = statsEnabled;
   
   // Initialize the rendering surface before starting the connection
@@ -367,24 +358,27 @@ int main(int argc, char** argv) {
 MessageResult startStream(std::string host, std::string width,
 std::string height, std::string fps, std::string bitrate, std::string rikey,
 std::string rikeyid, std::string appversion, std::string gfeversion, std::string rtspurl, bool framePacing,
-bool audioSync, bool hdrEnabled, std::string codecVideo, std::string audioConfig, bool statsEnabled) {
+bool audioSync, bool hdrEnabled, std::string codecVideo, std::string serverCodecSupportMode, bool statsEnabled) {
   printf("%s host: %s w: %s h: %s\n", __func__, host.c_str(), width.c_str(), height.c_str());
   return g_Instance->StartStream(host, width, height, fps, bitrate, rikey,
-  rikeyid, appversion, gfeversion, rtspurl, framePacing, audioSync, hdrEnabled, codecVideo, audioConfig, statsEnabled);
+  rikeyid, appversion, gfeversion, rtspurl, framePacing, audioSync, hdrEnabled, codecVideo, serverCodecSupportMode, statsEnabled);
 }
 
 MessageResult stopStream() { return g_Instance->StopStream(); }
+
 void toggleStats() {
   g_Instance->ToggleStats();
 }
+
 void stun(int callbackId) { g_Instance->STUN(callbackId); }
 
 void pair(int callbackId, std::string serverMajorVersion, std::string address, std::string randomNumber) {
   g_Instance->Pair(callbackId, serverMajorVersion, address, randomNumber);
 }
 
-void PostToJs(std::string msg) {
-  MAIN_THREAD_EM_ASM(
+void PostToJsAsync(std::string msg) {
+	printf("PostToJsAsync %s", msg.c_str());//FHEN
+  MAIN_THREAD_ASYNC_EM_ASM(
       {
         const msg = UTF8ToString($0);
         handleMessage(msg);
@@ -392,8 +386,9 @@ void PostToJs(std::string msg) {
       msg.c_str());
 }
 
-void PostToJsAsync(std::string msg) {
-  MAIN_THREAD_ASYNC_EM_ASM(
+void PostToJs(std::string msg) {
+  printf("PostToJsAsync %s", msg.c_str());//FHEN
+  MAIN_THREAD_EM_ASM(
       {
         const msg = UTF8ToString($0);
         handleMessage(msg);
@@ -422,6 +417,48 @@ void PostPromiseMessage(int callbackId, const std::string& type, const std::vect
       callbackId, type.c_str(), response.data(), response.size());
 }
 
+void wakeOnLan(int callbackId, std::string macAddress) {
+    unsigned char magicPacket[102];
+    unsigned char mac[6];
+
+    if (sscanf(macAddress.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) != 6) {
+        printf("Invalid MAC address format\n");
+        return;
+    }
+
+    for (int i = 0; i < 6; i++) {
+        magicPacket[i] = 0xFF;
+    }
+    for (int i = 1; i <= 16; i++) {
+        memcpy(&magicPacket[i * 6], &mac, 6 * sizeof(unsigned char));
+    }
+
+    int udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udpSocket == -1) {
+        printf("Failed to create socket\n");
+        return;
+    }
+
+    int broadcast = 1;
+    if (setsockopt(udpSocket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast)) == -1) {
+        printf("Failed to enable broadcast\n");
+        close(udpSocket);
+        return;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_BROADCAST;
+    addr.sin_port = htons(9); // Wake-on-LAN typically uses port 9
+
+    if (sendto(udpSocket, magicPacket, sizeof(magicPacket), 0, (struct sockaddr*) &addr, sizeof(addr)) == -1) {
+        printf("Failed to send magic packet\n");
+    }
+
+    close(udpSocket);
+}
+
 EMSCRIPTEN_BINDINGS(handle_message) {
   emscripten::value_object<MessageResult>("MessageResult")
     .field("type", &MessageResult::type)
@@ -432,4 +469,5 @@ EMSCRIPTEN_BINDINGS(handle_message) {
   emscripten::function("toggleStats", &toggleStats);
   emscripten::function("stun", &stun);
   emscripten::function("pair", &pair);
+  emscripten::function("wakeOnLan", &wakeOnLan);
 }

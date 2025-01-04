@@ -38,7 +38,6 @@
 #ifndef AV_INPUT_BUFFER_PADDING_SIZE
   #define AV_INPUT_BUFFER_PADDING_SIZE 64
 #endif
-
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
@@ -74,6 +73,7 @@ typedef struct _VIDEO_STATS {
     uint32_t totalRenderTime;
     uint32_t lastRtt;
     uint32_t lastRttVariance;
+	uint32_t lastFrameStats; //FHEN
     float totalFps;
     float receivedFps;
     float decodedFps;
@@ -93,7 +93,7 @@ public:
   MessageResult StartStream(std::string host, std::string width,
   std::string height, std::string fps, std::string bitrate, std::string rikey,
   std::string rikeyid, std::string appversion, std::string gfeversion, std::string rtspurl, bool framePacing,
-  bool audioSync, bool hdrEnabled, std::string codecVideo, std::string audioConfig, bool statsEnabled);
+  bool audioSync, bool hdrEnabled, std::string codecVideo, std::string serverCodecSupportMode, bool statsEnabled);
   MessageResult StopStream();
   void ToggleStats();
 
@@ -223,7 +223,6 @@ public:
   std::string m_GfeVersion;
   std::string m_RtspUrl;
   bool m_FramePacingEnabled;
-  int m_AudioConfig;
   bool m_AudioSyncEnabled;
   bool m_HdrEnabled;
   STREAM_CONFIGURATION m_StreamConfig;
@@ -269,8 +268,8 @@ public:
 
 extern MoonlightInstance* g_Instance;
 
-void PostToJs(std::string msg);
 void PostToJsAsync(std::string msg);
+void PostToJs(std::string msg);
 void PostPromiseMessage(int callbackId, const std::string& type, const std::string& response);
 void PostPromiseMessage(int callbackId, const std::string& type, const std::vector<uint8_t>& response);
 
@@ -281,8 +280,8 @@ void openUrl(int callbackId, std::string url, emscripten::val ppk, bool binaryRe
 
 MessageResult startStream(std::string host, std::string width, std::string height, std::string fps,
 std::string bitrate, std::string rikey, std::string rikeyid, std::string appversion,
-std::string gfeversion, std::string rtspurl, bool framePacing, bool audioSync, bool hdrEnabled, 
-std::string codecVideo, std::string audioConfig, bool statsEnabled);
+std::string gfeversion, std::string rtspurl, bool framePacing, bool audioSync, bool hdrEnabled, std::string codecVideo,
+std::string serverCodecSupportMode, bool statsEnabled);
 
 MessageResult stopStream();
 void toggleStats();
@@ -301,3 +300,5 @@ EM_BOOL handlePointerLockError(int eventType, const void *reserved, void *userDa
 
 void onConnectionStarted();
 void onConnectionStopped(int errorCode);
+
+
