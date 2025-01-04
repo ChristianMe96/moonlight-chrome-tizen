@@ -4,23 +4,24 @@ var pairingCert;
 var myUniqueid = '0123456789ABCDEF'; // Use the same UID as other Moonlight clients to allow them to quit each other's games
 var api; // `api` should only be set if we're in a host-specific screen. on the initial screen it should always be null.
 var isInGame = false; // flag indicating whether the game stream started
+var windowState = 'normal'; // chrome's windowState, possible values: 'normal' or 'fullscreen'
 var isDialogOpen = false; // track whether the dialog is open
+var model = null;
+var modelcode = null;
 
-function loadProductInfos() {
-  const modelCodePlaceholder = document.getElementById("modelCodePlaceholder");
+let repeatInterval;
+let repeatTimeout;
+
+function loadProductInfo() {
+  var modelCodePlaceholder = document.getElementById("modelCodePlaceholder");
   if (modelCodePlaceholder) {
-    const model = window.tizen.systeminfo.getCapability('http://tizen.org/system/model_name') || "Not Available";
-    const moonlightVersion = window.tizen.application.getAppInfo().version || "Not Available";
-    const tizenVersion = window.tizen.systeminfo.getCapability('http://tizen.org/feature/platform.version') || "Not Available";
-    modelCodePlaceholder.innerText = `TV Model: ${model} ; Moonlight: v${moonlightVersion} ; Tizen: v${tizenVersion}`;
+      model = webapis.productinfo.getModel();
+      modelcode = webapis.productinfo.getModelCode();
+      console.log("TV model: ", model);
+      console.log("TV modelcode: ", modelcode);
+      modelCodePlaceholder.innerText = "TV Model :" + (model ? model : "Not Available") + "    ;    ModelCode :" + (modelcode ? modelcode : "Not Available");
   }
 }
-
-let repeatAction = null;
-let lastInvokeTime = 0;
-let repeatStartTimeout = null;
-const REPEAT_START_DELAY = 350;
-const REPEAT_INTERVAL = 100;
 
 // Called by the common.js module.
 function attachListeners() {
@@ -33,9 +34,11 @@ function attachListeners() {
   $("#remoteAudioEnabledSwitch").on('click', saveRemoteAudio);
   $('#optimizeGamesSwitch').on('click', saveOptimize);
   $('#framePacingSwitch').on('click', saveFramePacing);
+  $('.audioConfigMenu li').on('click', saveAudioConfig);
   $('#audioSyncSwitch').on('click', saveAudioSync);
   $('#hdrSwitch').on('click', saveHdr);
   $('.codecVideoMenu li').on('click', saveCodecVideo);
+  $('#statsSwitch').on('click', saveStats);
   $('#addHostCell').on('click', addHost);
   $('#backIcon').on('click', showHostsAndSettingsMode);
   $('#quitCurrentApp').on('click', stopGameWithConfirmation);
@@ -48,60 +51,97 @@ function attachListeners() {
         Navigation.push(view);
     });
   }
+  registerMenu('selectAudioConfig', Views.SelectAudioConfigMenu);
   registerMenu('selectCodecVideo', Views.SelectCodecVideoMenu);
   registerMenu('selectResolution', Views.SelectResolutionMenu);
   registerMenu('selectFramerate', Views.SelectFramerateMenu);
   registerMenu('bandwidthMenu', Views.SelectBitrateMenu);
 
+  $(window).resize(fullscreenNaclModule);
+  if (runningOnChrome()) {
+    chrome.app.window.current().onMaximized.addListener(fullscreenChromeWindow);
+  }
+
   Controller.startWatching();
   window.addEventListener('gamepadbuttonpressed', (e) => {
     const pressed = e.detail.pressed;
     const key = e.detail.key;
-    const gamepadMapping = {
-      0: () => Navigation.accept(),
-      1: () => Navigation.back(),
-      8: () => Navigation.selectBtn(),
-      9: () => Navigation.startBtn(),
-      12: () => Navigation.up(),
-      13: () => Navigation.down(),
-      14: () => Navigation.left(),
-      15: () => Navigation.right(),
-    };
 
     if (pressed) {
-      if (gamepadMapping[key]) {
-        gamepadMapping[key]();
-        repeatAction = gamepadMapping[key];
-        lastInvokeTime = Date.now();
-        repeatStartTimeout = setTimeout(() => {
-          requestAnimationFrame(repeatActionHandler);
-        }, REPEAT_START_DELAY);
-      }
+        const gamepadMapping = {
+            0: () => Navigation.accept(),
+            1: () => Navigation.back(),
+            8: () => Navigation.selectBtn(),
+            9: () => Navigation.startBtn(),
+            12: () => startRepeatAction(() => Navigation.up()),
+            13: () => startRepeatAction(() => Navigation.down()),
+            14: () => Navigation.left(),
+            15: () => Navigation.right(),
+        };
+
+        if (gamepadMapping[key]) {
+            gamepadMapping[key]();
+        }
     } else {
-      repeatAction = null;
-      clearTimeout(repeatStartTimeout);
+        stopRepeatAction();
     }
   });
 }
 
-function sendEscapeToHost() { //FIXME: workaround to send escape key to host
-  Module.sendLiSendKeyboardEvent(0x80 << 8 | 0x1B, 0x03, 0);
-  Module.sendLiSendKeyboardEvent(0x80 << 8 | 0x1B, 0x04, 0);
+function startRepeatAction(actionFunction) {
+    clearTimeout(repeatTimeout);
+    actionFunction();
+    repeatTimeout = setTimeout(() => {
+        actionFunction();
+        repeatInterval = setInterval(actionFunction, 100);
+    }, 350);
 }
 
-function repeatActionHandler() {
-  if (repeatAction && Date.now() - lastInvokeTime > REPEAT_INTERVAL) {
-      repeatAction();
-      lastInvokeTime = Date.now();
-  }
-  if (repeatAction) {
-    requestAnimationFrame(repeatActionHandler);
-  }
+function stopRepeatAction() {
+    clearInterval(repeatInterval);
+    clearTimeout(repeatTimeout);
+}
+
+function fullscreenChromeWindow() {
+  // when the user clicks the maximize button on the window,
+  // FIRST restore it to the previous size, then fullscreen it to the whole screen
+  // this prevents the previous window size from being 'maximized',
+  // and allows us to functionally retain two window sizes
+  // so that when the user hits `esc`, they go back to the "restored" size,
+  // instead of "maximized", which would immediately go to fullscreen
+  chrome.app.window.current().restore();
+  chrome.app.window.current().fullscreen();
 }
 
 function loadWindowState() {
   if (!runningOnChrome()) {
     return;
+  }
+
+  console.log('restoring state');
+  chrome.storage.sync.get('windowState', function(item) {
+    // load stored window state
+    windowState = (item && item.windowState) ?
+      item.windowState :
+      windowState;
+
+    // subscribe to chrome's windowState events
+    chrome.app.window.current().onFullscreened.addListener(onFullscreened);
+    chrome.app.window.current().onBoundsChanged.addListener(onBoundsChanged);
+  });
+}
+
+function onFullscreened() {
+  if (!isInGame && windowState == 'normal') {
+    storeData('windowState', 'fullscreen', null);
+    windowState = 'fullscreen';
+  }
+}
+
+function onBoundsChanged() {
+  if (!isInGame && windowState == 'fullscreen') {
+    storeData('windowState', 'normal', null);
+    windowState = 'normal';
   }
 }
 
@@ -110,6 +150,7 @@ function changeUiModeForNaClLoad() {
   $("#main-content").children().not("#listener, #naclSpinner").hide();
   $('#naclSpinnerMessage').text('Loading Moonlight plugin...');
   $('#naclSpinner').css('display', 'inline-block');
+  $('#stream_stats').css('display', 'inline-block');
 }
 
 function startPollingHosts() {
@@ -207,19 +248,6 @@ function stopBackgroundPollingOfHost(host) {
   console.log('%c[index.js, backgroundPolling]', 'color: green;', 'Stopping background polling of host ' + host.serverUid + '\n', host, host.toString()); //Logging both object (for console) and toString-ed object (for text logs)
   window.clearInterval(activePolls[host.serverUid]);
   delete activePolls[host.serverUid];
-}
-
-function updateMacAddress(host) { //FIXME(?) : needed to correctly set the stored mac address (indexedDB)
-  getData('hosts', function (previousValue) {
-    var hosts = previousValue.hosts != null ? previousValue.hosts : {};
-    var currentHostUID = host.serverUid;
-    if (host.macAddress != "00:00:00:00:00:00") {
-      if (hosts[currentHostUID] && hosts[currentHostUID].macAddress != host.macAddress) {
-        console.log("Updated MAC address for host " + host.hostname + " from " + hosts[currentHostUID].macAddress + " to " + host.macAddress);
-        saveHosts();
-      }
-    }
-  });
 }
 
 function snackbarLog(givenMessage) {
@@ -350,7 +378,6 @@ function addHost() {
   // try to pair if they continue
   $('#continueAddHost').off('click');
   $('#continueAddHost').on('click', function() {
-  $(this).prop('disabled', true); // disable the button so users don't send multiple requests
 	var inputHost;
 	if ($('#manualInputToggle').prop('checked')) {
 	      // Manual input is selected
@@ -388,11 +415,9 @@ function addHost() {
           saveHosts();
         });
       }
-      $('#continueAddHost').prop('disabled', false); // re-enable the button on success
     }.bind(this),
     function(failure) {
       snackbarLog('Failed to connect to ' + _nvhttpHost.hostname + '! Ensure Sunshine is running on your host PC or GameStream is enabled in GeForce Experience SHIELD settings.');
-      $('#continueAddHost').prop('disabled', false); // re-enable the button on failure
     }.bind(this));
   });
 }
@@ -415,70 +440,17 @@ function addHostToGrid(host, ismDNSDiscovered) {
     class: "mdl-card__title-text",
     html: host.hostname
   }));
-  var settingsButton = $("<div>", {
-    class: "host-settings",
-    id: "hostSettingsButton-" + host.serverUid,
+  var removalButton = $("<div>", {
+    class: "remove-host",
+    id: "removeHostButton-" + host.serverUid,
     role: 'button',
     tabindex: 0,
-    'aria-label': 'Settings ' + host.hostname
+    'aria-label': 'Remove host ' + host.hostname
   });
-
-  var settingsDialog = $('<dialog>', {
-    class: 'mdl-dialog',
-    id: "settingsDialog-" + host.serverUid
-  }).appendTo(outerDiv);
-
-  $('<h4>', {
-    class: 'mdl-dialog__title',
-    text: 'Settings ' + host.hostname
-  }).appendTo(settingsDialog);
-
-  var dialogContent = $('<div>', {
-    class: 'mdl-dialog__content'
-  }).appendTo(settingsDialog);
-
-  var options = [ // host settings dialog options, used an array to make it easier to add more options
-    { text: 'Wake PC (WOL)', id: "wake-" + host.hostname, action: function () {host.sendWOL(); } },
-    // { text: 'Show hidden Apps (WIP)', id: "showHiddenApps-" + host.hostname, action: null }, //TODO: implement this
-    { text: 'Refresh box art', id: "refreshBoxArt-" + host.hostname, action: function () {host.purgeBoxArt(); } },
-    { text: 'Remove ' + host.hostname, id: "remove-" + host.hostname, action: function () {removeClicked(host); } }
-  ];
-
-  options.forEach(function (option) {
-    var button = $('<button>', {
-      class: 'mdl-button mdl-js-button mdl-button--raised mdl-js-ripple-effect',
-      text: option.text,
-      id: option.id
-    });
-    button.click(function() {
-      Navigation.pop();
-      option.action();
-      settingsDialog[0].close();
-    });
-    button.appendTo(dialogContent);
+  removalButton.off('click');
+  removalButton.click(function() {
+    removeClicked(host);
   });
-
-  $('<button>', {
-    type: 'button',
-    class: 'mdl-button',
-    text: 'Close',
-    id: 'closeSettingsDialog'
-  }).click(function () {
-    settingsDialog[0].close();
-    Navigation.pop();
-  }).appendTo($('<div>', {
-    class: 'mdl-dialog__actions'
-  }).appendTo(settingsDialog));
-
-  if (!settingsDialog[0].showModal) {
-    dialogPolyfill.registerDialog(settingsDialog[0]);
-  }
-
-  settingsButton.click(function () {
-    settingsDialog[0].showModal();
-    Navigation.push(Views.SettingsDialog, host.hostname);
-  });
-
   cell.off('click');
   cell.click(function() {
     hostChosen(host);
@@ -491,7 +463,7 @@ function addHostToGrid(host, ismDNSDiscovered) {
   $(outerDiv).append(cell);
   if (!ismDNSDiscovered) {
     // we don't have the option to delete mDNS hosts.  So don't show it to the user.
-    $(outerDiv).append(settingsButton);
+    $(outerDiv).append(removalButton);
   }
   $('#host-grid').append(outerDiv);
   hosts[host.serverUid] = host;
@@ -529,28 +501,88 @@ function removeClicked(host) {
 
 window.removeClicked = removeClicked;
 
-// Function to show the Restart Moonlight dialog
+// Function to create and show the Restart Moonlight dialog
 function showRestartMoonlightDialog() {
+	// Find the existing dialog element
   var restartMoonlightDialog = document.querySelector('#restartMoonlightDialog');
+  
+    if (!restartMoonlightDialog) {
+    // If the dialog element doesn't exist, create it
+    var restartMoonlightDialog = document.createElement('dialog');
+    restartMoonlightDialog.id = 'restartMoonlightDialog';
+    restartMoonlightDialog.classList.add('mdl-dialog');
+
+    // Create the dialog content
+    restartMoonlightDialog.innerHTML = `
+      <h3 class="mdl-dialog__title">Restart Moonlight</h3>
+      <div class="mdl-dialog__content">
+      <p id="restartMoonlightDialogText">
+        After changing video codec, you should restart the application
+      </p>
+      </div>
+      <div class="mdl-dialog__actions">
+      <button type="button" class="mdl-button mdl-js-button mdl-button--raised mdl-button--colored mdl-js-ripple-effect" id="pressOK">OK</button>
+      </div>
+    `;
+
+    // Append the dialog to the DOM
+    document.body.appendChild(restartMoonlightDialog);
+
+    // Initialize the dialog
+    componentHandler.upgradeElements(restartMoonlightDialog);
+  }
 
   // Show the dialog and push the view
   restartMoonlightDialog.showModal();
   Navigation.push(Views.RestartMoonlightDialog);
 
+  // Set the dialog as open
   isDialogOpen = true;
 
+  // Close the dialog if the OK button is pressed
   $('#pressOK').off('click');
   $('#pressOK').on('click', function() {
     restartMoonlightDialog.close();
+    // Remove the dialog from the DOM if the dialog is open
+    document.body.removeChild(restartMoonlightDialog);
     isDialogOpen = false;
     Navigation.pop();
   });
 }
 	
-// Function to show the Terminate Moonlight dialog
+// Function to create and show the Terminate Moonlight dialog
 function showTerminateMoonlightDialog() {
+  // Find the existing dialog element
   var terminateMoonlightDialog = document.querySelector('#terminateMoonlightDialog');
-  
+
+  if (!terminateMoonlightDialog) {
+    // If the dialog element doesn't exist, create it
+    var terminateMoonlightDialog = document.createElement('dialog');
+    terminateMoonlightDialog.id = 'terminateMoonlightDialog';
+    terminateMoonlightDialog.classList.add('mdl-dialog');
+
+    // Create the dialog content
+    terminateMoonlightDialog.innerHTML = `
+      <h3 class="mdl-dialog__title">Exit Moonlight</h3>
+      <div class="mdl-dialog__content">
+        <p id="terminateMoonlightDialogText">
+          Are you sure you want to exit Moonlight?
+        </p>
+      </div>
+      <div class="mdl-dialog__actions">
+        <button type="button" class="mdl-button mdl-js-button mdl-button--raised mdl-button--colored mdl-js-ripple-effect" id="cancelTerminateMoonlight">Cancel</button>
+        <button type="button" class="mdl-button mdl-js-button mdl-button--raised mdl-button--colored mdl-js-ripple-effect" id="exitTerminateMoonlight">Exit</button>
+      </div>
+    `;
+
+    // Append the dialog to the DOM
+    document.body.appendChild(terminateMoonlightDialog);
+
+    // Initialize the dialog
+    componentHandler.upgradeElements(terminateMoonlightDialog);
+  }
+
+  // Show the dialog and push the view
   terminateMoonlightDialog.showModal();
   Navigation.push(Views.TerminateMoonlightDialog);
 
@@ -561,6 +593,8 @@ function showTerminateMoonlightDialog() {
   $('#cancelTerminateMoonlight').off('click');
   $('#cancelTerminateMoonlight').on('click', function() {
     terminateMoonlightDialog.close();
+    // Remove the dialog from the DOM if the dialog is open
+    document.body.removeChild(terminateMoonlightDialog);
     isDialogOpen = false;
     Navigation.pop();
     Navigation.change(Views.Hosts);
@@ -570,6 +604,8 @@ function showTerminateMoonlightDialog() {
   $('#exitTerminateMoonlight').off('click');
   $('#exitTerminateMoonlight').on('click', function() {
     terminateMoonlightDialog.close();
+    // Remove the dialog from the DOM if the dialog is open
+    document.body.removeChild(terminateMoonlightDialog);
     isDialogOpen = false;
     Navigation.pop();
     tizen.application.getCurrentApplication().exit();
@@ -635,6 +671,7 @@ function showApps(host) {
   // Show a spinner while the applist loads
   $('#naclSpinnerMessage').text('Loading apps...');
   $('#naclSpinner').css('display', 'inline-block');
+  $('#stream_stats').css('display', 'inline-block');
 
   $("div.game-container").remove();
 
@@ -673,6 +710,23 @@ function showApps(host) {
         gameCard.addEventListener('mouseover', e => {
           gameCard.focus();
         });
+        gameCard.addEventListener('keydown', e => {
+          if(e.key == "Enter") {
+            startGame(host, app.id);
+          }
+          if(e.key == "ArrowLeft") {
+            let prev = gameCard.previousSibling
+            if(prev !== null)
+              gameCard.previousSibling.focus()
+            // TODO: Add a sound when limit reached
+          }
+          if(e.key == "ArrowRight") {
+            let next = gameCard.nextSibling
+            if(next !== null)
+              gameCard.nextSibling.focus()
+            // TODO: Add a sound when limit reached
+          }
+        })
         document.querySelector('#game-grid').appendChild(gameCard);
         // apply CSS stylization to indicate whether the app is active
         stylizeBoxArt(host, app.id);
@@ -733,6 +787,11 @@ function showAppsMode() {
   $('body').css('backgroundColor', '#282C38');
   $('#nacl_module').css('display', 'none');
 
+  // Restore back to a window
+  if (runningOnChrome() && windowState == 'normal') {
+    chrome.app.window.current().restore();
+  }
+
   isInGame = false;
 
   // FIXME: We want to eventually poll on the app screen but we can't now
@@ -789,7 +848,7 @@ function startGame(host, appID) {
       }
 
       var frameRate = $('#selectFramerate').data('value').toString();
-      var codecVideo = $('#selectCodecVideo').data('value').toString();
+	  var codecVideo = $('#selectCodecVideo').data('value').toString();
       var optimize = $("#optimizeGamesSwitch").parent().hasClass('is-checked') ? 1 : 0;
       var streamWidth = $('#selectResolution').data('value').split(':')[0];
       var streamHeight = $('#selectResolution').data('value').split(':')[1];
@@ -798,6 +857,8 @@ function startGame(host, appID) {
       const framePacingEnabled = $('#framePacingSwitch').parent().hasClass('is-checked') ? 1 : 0;
       const audioSyncEnabled = $('#audioSyncSwitch').parent().hasClass('is-checked') ? 1 : 0;
       const hdrEnabled = $('#hdrSwitch').parent().hasClass('is-checked') ? 1 : 0;
+      var audioConfig = $('#selectAudioConfig').data('value').toString();
+      const statsEnabled = $('#statsSwitch').parent().hasClass('is-checked') ? 1 : 0;
       console.log('%c[index.js, startGame]', 'color:green;',
                   'startRequest:' + host.address +
                   ":" + streamWidth +
@@ -808,7 +869,10 @@ function startGame(host, appID) {
                   ":" + framePacingEnabled,
                   ":" + audioSyncEnabled,
                   ":" + hdrEnabled,
-                  ":" + codecVideo);
+                  ":" + codecVideo,
+                  ":" + audioConfig,
+                  ":" + statsEnabled
+                  );
 
       var rikey = generateRemoteInputKey();
       var rikeyid = generateRemoteInputKeyId();
@@ -840,12 +904,13 @@ function startGame(host, appID) {
             rikeyid.toString(),
             host.appVersion,
             "",
-            $root.find('sessionUrl0').text().trim(),
-            framePacingEnabled,
+			$root.find('sessionUrl0').text().trim(),
+			framePacingEnabled,
             audioSyncEnabled,
             hdrEnabled,
             codecVideo,
-            host.serverCodecSupportMode		 
+            audioConfig,
+            statsEnabled
           ]);
         }, function(failedResumeApp) {
           console.error('%c[index.js, startGame]', 'color:green;', 'Failed to resume the app! Returned error was' + failedResumeApp);
@@ -883,12 +948,13 @@ function startGame(host, appID) {
           rikeyid.toString(),
           host.appVersion,
           "",
-		      $root.find('sessionUrl0').text().trim(),
+		  $root.find('sessionUrl0').text().trim(),
           framePacingEnabled,
           audioSyncEnabled,
           hdrEnabled,
           codecVideo,
-          host.serverCodecSupportMode			  
+          audioConfig,
+          statsEnabled
         ]);
       }, function(failedLaunchApp) {
         console.error('%c[index.js, launchApp]', 'color: green;', 'Failed to launch app width id: ' + appID + '\nReturned error was: ' + failedLaunchApp);
@@ -909,9 +975,15 @@ function playGameMode() {
   $("#main-content").addClass("fullscreen");
   $("#listener").addClass("fullscreen");
 
+  if (runningOnChrome()) {
+    chrome.app.window.current().fullscreen();
+  }
   fullscreenNaclModule();
   $('#loadingSpinner').css('display', 'inline-block');
   Navigation.stop();
+
+  $('#stream_stats').css('display', 'inline-block');
+  $('#stream_stats').show();
 }
 
 // Maximize the size of the nacl module by scaling and resizing appropriately
@@ -1018,16 +1090,27 @@ function openIndexDB(callback) {
   }
 
   console.log('Opening IndexDB');
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persisted().then(persistent=>{
+      if (persistent)
+        console.log("Storage will not be cleared except by explicit user action");
+      else
+        console.log("Storage may be cleared by the UA under storage pressure.");
+    });
+  } else {
+    console.log('Persistent storage not available');
+  }
 
   if (!indexedDB) {
-    indexedDB = self.indexedDB;
+    indexedDB = self.indexedDB || self.webkitIndexedDB ||
+        self.mozIndexedDB || self.OIndexedDB || self.msIndexedDB;
   }
 
   // Create/open database
   const request = indexedDB.open(dbName, dbVersion);
 
   request.onerror = function(event) {
-    console.error('Error creating/accessing IndexedDB database', event);
+    console.log('Error creating/accessing IndexedDB database');
   };
 
   request.onsuccess = function(event) {
@@ -1035,12 +1118,23 @@ function openIndexDB(callback) {
     db = request.result;
 
     db.onerror = function(event) {
-      console.error('Error creating/accessing IndexedDB database', event);
+      console.log('Error creating/accessing IndexedDB database');
     };
 
-    callback();
+    // Interim solution for Google Chrome to create an objectStore.
+    // Will be deprecated
+    if (db.setVersion && db.version != dbVersion) {
+      const setVersion = db.setVersion(dbVersion);
+      setVersion.onsuccess = function() {
+        createObjectStore(db);
+        callback();
+      };
+    } else {
+      callback();
+    }
   };
 
+  // For future use. Currently only in latest Firefox versions
   request.onupgradeneeded = function(event) {
     createObjectStore(event.target.result);
   };
@@ -1053,9 +1147,17 @@ function callCb(key, value, callbackFunction) {
 }
 
 function getData(key, callbackFunction) {
+  if (runningOnChrome()) {
+    chrome.storage.sync.get(key, callbackFunction);
+    return;
+  }
+
+  // Non Chrome path
   let cb = function() {
     try {
+      // Open a transaction to the database
       const transaction = db.transaction(storeName, 'readonly');
+
       const readRequest = transaction.objectStore(storeName).get(key);
 
       // Retrieve the data that was stored
@@ -1065,6 +1167,8 @@ function getData(key, callbackFunction) {
         let value = null;
         if (readRequest.result) {
           value = JSON.parse(readRequest.result);
+          console.log('Parsed value');
+          console.log(value);
         }
 
         callCb(key, value, callbackFunction);
@@ -1091,20 +1195,31 @@ function getData(key, callbackFunction) {
 }
 
 function storeData(key, data, callbackFunction) {
-  let cb = function () {
-    try {
-      const transaction = db.transaction(storeName, 'readwrite'); //open a transaction to the database
-      const put = transaction.objectStore(storeName).put(
-        JSON.stringify(data), key);
+  if (runningOnChrome()) {
+    var obj = {};
+    obj[key] = data;
+    chrome.storage.sync.set(obj, callbackFunction);
+    return;
+  }
 
-      transaction.oncomplete = function (e) {
+  // Non Chrome path
+  let cb = function() {
+    try {
+      // Open a transaction to the database
+      const transaction = db.transaction(storeName, 'readwrite');
+
+      // Put the text into the database
+      const put = transaction.objectStore(storeName).put(
+                  JSON.stringify(data), key);
+
+      transaction.oncomplete = function(e) {
         console.log('Data at key: ' + key + ' stored as: ' + JSON.stringify(data));
         if (callbackFunction) {
           callbackFunction();
         }
       };
 
-      transaction.onerror = function (e) {
+      transaction.onerror = function(e) {
         console.error('Error storing data in IndexDB: ' + e);
       };
     } catch (e) {
@@ -1154,10 +1269,25 @@ function saveHdr() {
   }, 100);
 }
 
+function saveStats() {
+  setTimeout(function() {
+    const chosenStats = $("#statsSwitch").parent().hasClass('is-checked');
+    console.log('%c[index.js, saveStats]', 'color: green;', 'Saving Stats state : ' + chosenStats);
+    storeData('stats', chosenStats, null);
+  }, 100);
+}
+
 function saveCodecVideo() {
   var chosenCodecVideo = $(this).data('value');
   $('#selectCodecVideo').text($(this).text()).data('value', chosenCodecVideo);
   storeData('codecVideo', chosenCodecVideo, null);
+  Navigation.pop();
+}
+
+function saveAudioConfig() {
+  var chosenAudioConfig = $(this).data('value');
+  $('#selectAudioConfig').text($(this).text()).data('value', chosenAudioConfig);
+  storeData('audioConfig', chosenAudioConfig, null);
   Navigation.pop();
 }
 
@@ -1177,6 +1307,9 @@ function saveFramerate() {
   Navigation.pop();
 }
 
+// storing data in chrome.storage takes the data as an object, and shoves it into JSON to store
+// unfortunately, objects with function instances (classes) are stripped of their function instances when converted to a raw object
+// so we cannot forget to revive the object after we load it.
 function saveHosts() {
   storeData('hosts', hosts, null);
 }
@@ -1186,6 +1319,8 @@ function saveBitrate() {
 }
 
 function saveRemoteAudio() {
+  // MaterialDesignLight uses the mouseup trigger, so we give it some time to change the class name before
+  // checking the new state
   setTimeout(function() {
     var remoteAudioState = $("#remoteAudioEnabledSwitch").parent().hasClass('is-checked');
     console.log('%c[index.js, saveRemoteAudio]', 'color: green;', 'Saving remote audio state : ' + remoteAudioState);
@@ -1196,44 +1331,66 @@ function saveRemoteAudio() {
 function updateDefaultBitrate() {
   var res = $('#selectResolution').data('value');
   var frameRate = $('#selectFramerate').data('value').toString();
+  var resSplit = res.split(":");
+  var width = parseInt(resSplit[0]);
+  var height = parseInt(resSplit[1]);
+  var newBitrate = getDefaultBitrate(width, height, frameRate);
 
-  // These quality presets include video resolution like 480p, 720p, 1080p, 1440p, 2160p (4K) and video frame rate like 30 FPS and 60 FPS
-  if (res === "858:480") {
-    if (frameRate === "30") { // 480p, 30 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('2');
-    } else { // 480p, 60 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('4');
-    }
-  } else if (res === "1280:720") {
-    if (frameRate === "30") { // 720p, 30 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('5');
-    } else { // 720p, 60 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('10');
-    }
-  } else if (res === "1920:1080") {
-    if (frameRate === "30") { // 1080p, 30 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('10');
-    } else { // 1080p, 60 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('20');
-    }
-  } else if (res === "2560:1440") {
-    if (frameRate === "30") { // 1440p, 30 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('20');
-    } else { // 1440p, 60 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('40');
-    }
-  } else if (res === "3840:2160") {
-    if (frameRate === "30") { // 2160p (4K), 30 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('40');
-    } else { // 2160p (4K), 60 FPS
-      $('#bitrateSlider')[0].MaterialSlider.change('80');
-    }
-  } else { // unrecognized option. In case someone screws with the JS to add custom resolutions
-    $('#bitrateSlider')[0].MaterialSlider.change('10');
+  if (newBitrate <= 0) {
+    newBitrate = 20;
   }
+
+  $('#bitrateSlider')[0].MaterialSlider.change(newBitrate / 1000);
 
   updateBitrateField();
   saveBitrate();
+}
+
+function getDefaultBitrate(width, height, fps) {
+  // Don't scale bitrate linearly beyond 60 FPS. It's definitely not a linear
+  // bitrate increase for frame rate once we get to values that high.
+  let frameRateFactor = (fps <= 60 ? fps : (Math.sqrt(fps / 60) * 60)) / 30;
+
+  // TODO: Collect some empirical data to see if these defaults make sense.
+  // We're just using the values that the Shield used, as we have for years.
+  const resTable = [
+    { pixels: 640 * 360, factor: 1 },
+    { pixels: 854 * 480, factor: 2 },
+    { pixels: 1280 * 720, factor: 5 },
+    { pixels: 1920 * 1080, factor: 10 },
+    { pixels: 2560 * 1440, factor: 20 },
+    { pixels: 3840 * 2160, factor: 40 },
+    { pixels: -1, factor: -1 },
+  ];
+
+  // Calculate the resolution factor by linear interpolation of the resolution table
+  let resolutionFactor;
+  let pixels = width * height;
+  for (let i = 0; ; i++) {
+    if (pixels === resTable[i].pixels) {
+      // We can bail immediately for exact matches
+      resolutionFactor = resTable[i].factor;
+      break;
+    }
+    else if (pixels < resTable[i].pixels) {
+      if (i === 0) {
+        // Never go below the lowest resolution entry
+        resolutionFactor = resTable[i].factor;
+      }
+      else {
+        // Interpolate between the entry greater than the chosen resolution (i) and the entry less than the chosen resolution (i-1)
+        resolutionFactor = ((pixels - resTable[i - 1].pixels) / (resTable[i].pixels - resTable[i - 1].pixels)) * (resTable[i].factor - resTable[i - 1].factor) + resTable[i - 1].factor;
+      }
+      break;
+    }
+    else if (resTable[i].pixels === -1) {
+      // Never go above the highest resolution entry
+      resolutionFactor = resTable[i - 1].factor;
+      break;
+    }
+  }
+
+  return Math.round(resolutionFactor * frameRateFactor) * 1000;
 }
 
 function initSamsungKeys() {
@@ -1253,6 +1410,9 @@ function initSamsungKeys() {
       'ChannelList',   // F7
       'ChannelDown',   // F11
       'ChannelUp',     // F12
+      'MediaPlayPause',
+      'MediaPlay',
+      'Info'
     ],
     onKeydownListener: remoteControllerHandler
   };
@@ -1263,25 +1423,29 @@ function initSamsungKeys() {
 
 function loadUserData() {
   console.log('loading stored user data');
-  openIndexDB(loadUserDataCb);
+  if (runningOnChrome()) {
+    loadUserDataCb();
+  } else {
+    openIndexDB(loadUserDataCb);
+  }
 }
 
 function loadUserDataCb() {
   console.log('load stored VideoCodec prefs');
-  getData('codecVideo', function (previousValue) {
+  getData('codecVideo', function(previousValue) {
     if (previousValue.codecVideo != null) {
-      $('.codecVideoMenu li').each(function () {
+      $('.codecVideoMenu li').each(function() {
         if ($(this).data('value') === previousValue.codecVideo) {
           $('#selectCodecVideo').text($(this).text()).data('value', previousValue.codecVideo);
         }
       });
     }
   });
-
+  
   console.log('load stored resolution prefs');
-  getData('resolution', function (previousValue) {
+  getData('resolution', function(previousValue) {
     if (previousValue.resolution != null) {
-      $('.resolutionMenu li').each(function () {
+      $('.resolutionMenu li').each(function() {
         if ($(this).data('value') === previousValue.resolution) {
           $('#selectResolution').text($(this).text()).data('value', previousValue.resolution);
         }
@@ -1290,7 +1454,7 @@ function loadUserDataCb() {
   });
 
   console.log('Load stored remote audio prefs');
-  getData('remoteAudio', function (previousValue) {
+  getData('remoteAudio', function(previousValue) {
     if (previousValue.remoteAudio == null) {
       document.querySelector('#externalAudioBtn').MaterialIconToggle.uncheck();
     } else if (previousValue.remoteAudio == false) {
@@ -1312,7 +1476,7 @@ function loadUserDataCb() {
   });
 
   console.log('load stored optimization prefs');
-  getData('optimize', function (previousValue) {
+  getData('optimize', function(previousValue) {
     if (previousValue.optimize == null) {
       document.querySelector('#optimizeGamesBtn').MaterialIconToggle.check();
     } else if (previousValue.optimize == false) {
@@ -1344,6 +1508,28 @@ function loadUserDataCb() {
     }
   });
 
+  console.log('load stored audioConfig prefs');
+  getData('audioConfig', function(previousValue) {
+    if (previousValue.audioConfig != null) {
+      $('.audioConfigMenu li').each(function() {
+        if ($(this).data('value') === previousValue.audioConfig) {
+          $('#selectAudioConfig').text($(this).text()).data('value', previousValue.audioConfig);
+        }
+      });
+    }
+  });
+
+  console.log('load stats prefs');
+  getData('stats', function(previousValue) {
+    if (previousValue.stats == null) {
+      document.querySelector('#statsBtn').MaterialIconToggle.check();
+    } else if (previousValue.stats == false) {
+      document.querySelector('#statsBtn').MaterialIconToggle.uncheck();
+    } else {
+      document.querySelector('#statsBtn').MaterialIconToggle.check();
+    }
+  });
+
   console.log('load stored audioSync prefs');
   getData('audioSync', function(previousValue) {
     if (previousValue.audioSync == null) {
@@ -1363,7 +1549,11 @@ function loadUserDataCb() {
 }
 
 function loadHTTPCerts() {
-  openIndexDB(loadHTTPCertsCb);
+  if (runningOnChrome()) {
+    loadHTTPCertsCb();
+  } else {
+    openIndexDB(loadHTTPCertsCb);
+  }
 }
 
 function loadHTTPCertsCb() {
@@ -1409,7 +1599,7 @@ function loadHTTPCertsCb() {
       getData('hosts', function(previousValue) {
         hosts = previousValue.hosts != null ? previousValue.hosts : {};
         for (var hostUID in hosts) { // programmatically add each new host.
-        var revivedHost = new NvHTTP(hosts[hostUID].address, myUniqueid, hosts[hostUID].userEnteredAddress, hosts[hostUID].macAddress);
+          var revivedHost = new NvHTTP(hosts[hostUID].address, myUniqueid, hosts[hostUID].userEnteredAddress);
           revivedHost.serverUid = hosts[hostUID].serverUid;
           revivedHost.externalIP = hosts[hostUID].externalIP;
           revivedHost.hostname = hosts[hostUID].hostname;
@@ -1430,36 +1620,41 @@ function onWindowLoad() {
 
   initSamsungKeys();
   loadWindowState();
-  loadProductInfos();
   loadUserData();
-
-  var videoElement = document.getElementById('nacl_module'); //FIXME: workaround to send escape key to host
-  videoElement.addEventListener('keydown', function (event) {
-    if (event.key === 'XF86Back') {
-      if (isInGame) {
-        sendEscapeToHost();
-        videoElement.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, clientX: 0, clientY: 0 }));
-      }
-    }
-  });
+  loadProductInfo();
 }
 
 window.onload = onWindowLoad;
 
 // Required on TizenTV, to get gamepad events.
-window.addEventListener('gamepadconnected', function (event) {
-  const connectedGamepad = event.gamepad;
-  console.log('%c[index.js, gamepadconnected] gamepad connected: ', 'color: green;', connectedGamepad);
+window.addEventListener('gamepadconnected', function(event) {
+	  const connectedGamepad = event.gamepad;
+	  console.log('%c[index.js, gamepadconnected] gamepad connected: ', 'color: green;', connectedGamepad);
 
-  if (connectedGamepad.vibrationActuator) { // Check if the gamepad supports rumble
-    console.log('Gamepad supports vibration.');
-  } else {
-    console.log('Gamepad does not support vibration.');
-  }
+    if (connectedGamepad.vibrationActuator) { // Check if the gamepad supports rumble, and if so rumble once to notify users.
+        console.log('Gamepad supports vibration.');
+
+        // Specify vibration parameters
+        const startDelay = 0;
+        const duration = 200; // in milliseconds
+        const weakMagnitude = 0.5;
+        const strongMagnitude = 0.5;
+
+        // Play the dual-rumble effect
+        connectedGamepad.vibrationActuator.playEffect('dual-rumble', {
+            startDelay: startDelay,
+            duration: duration,
+            weakMagnitude: weakMagnitude,
+            strongMagnitude: strongMagnitude,
+        });
+
+	  } else {
+	    console.log('Gamepad does not support vibration.');
+	  }
 });
-
-window.addEventListener('gamepaddisconnected', function (event) {
+// Required on TizenTV, to get gamepad events.
+window.addEventListener('gamepaddisconnected', function(event) {
   console.log('%c[index.js, gamepaddisconnected] gamepad disconnected: ' +
-    JSON.stringify(event.gamepad),
-    event.gamepad);
+              JSON.stringify(event.gamepad),
+              event.gamepad);
 });
